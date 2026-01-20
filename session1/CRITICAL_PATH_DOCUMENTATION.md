@@ -10,7 +10,7 @@ The gate sizer uses a reinforcement learning (RL) approach to optimize gate size
 
 ### Main Function: `get_critical_path_nodes()`
 
-Located in `demo2_gate_sizing_helpers.py` (lines 239-247), this function identifies the nodes (gates) on critical paths:
+Located in `demo2_gate_sizing_helpers.py` (line 262), this function identifies the nodes (gates) on critical paths:
 
 ```python
 def get_critical_path_nodes(graph, ep_num, TOP_N_NODES, n_cells):
@@ -59,7 +59,7 @@ The gate sizer obtains timing and physical data from OpenROAD through its Python
 
 ### A. Initial Design Loading (`load_design()` function)
 
-Located in `demo2_gate_sizing_helpers.py` (lines 509-527):
+Located in `demo2_gate_sizing_helpers.py` (line 557):
 
 ```python
 def load_design(path):
@@ -103,7 +103,7 @@ def load_design(path):
 
 ### B. Extracting Pin Properties (`pin_properties()` function)
 
-Located in `demo2_gate_sizing_helpers.py` (lines 113-133):
+Located in `demo2_gate_sizing_helpers.py` (line 113):
 
 ```python
 def pin_properties(dbpin, CLKset, ord_design, timing):
@@ -153,7 +153,7 @@ def pin_properties(dbpin, CLKset, ord_design, timing):
 
 ### C. Building the Graph (`iterate_nets_get_properties()` function)
 
-Located in `demo2_gate_sizing_helpers.py` (lines 530-592):
+Located in `demo2_gate_sizing_helpers.py` (line 617):
 
 This function iterates through all nets in the design and builds a graph representation:
 
@@ -213,7 +213,7 @@ def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell
 
 ### D. Real-Time Updates During Optimization (`env_step()` function)
 
-Located in `demo2_gate_sizing_helpers.py` (lines 258-354):
+Located in `demo2_gate_sizing_helpers.py` (line 258):
 
 When the RL agent takes an action (resize a gate), the function updates the design:
 
