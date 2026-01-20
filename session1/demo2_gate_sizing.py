@@ -84,8 +84,15 @@ cell_name_dict = {}
 for k,v in cell_dict.items():
   cell_name_dict[v['name']] = k
 ########################################
-#laod design using openroad python apis#
+#load design using openroad python apis#
 ########################################
+# Load design into OpenROAD and initialize timing analysis
+# Returns: ord_tech (Tech), ord_design (Design), timing (OpenSTA), db, chip, block, nets
+# This function uses OpenROAD Python APIs to:
+#   1. Load Liberty (.lib) and LEF files for technology information
+#   2. Read Verilog netlist and link top module
+#   3. Set clock constraints using TCL commands
+#   4. Return database objects for querying circuit properties
 ord_tech, ord_design, timing, db, chip, block, nets = load_design(pyargs.path)
 ################################################################################
 #srcs, dsts : source and destination instances for the graph function.         #
@@ -94,6 +101,12 @@ ord_tech, ord_design, timing, db, chip, block, nets = load_design(pyargs.path)
 #                          fanout of the instances in an easily indexable way. #
 #endpoints : Storing all the endpoints(here they are flipflops)                #
 ################################################################################
+# Build graph representation from OpenROAD data
+# Uses OpenROAD APIs to extract timing properties:
+#   - timing.getPinSlack(): Get slack values (used for critical path finding)
+#   - timing.getPinSlew(): Get signal transition times
+#   - timing.getPortCap(): Get load capacitances
+# These timing values are stored in inst_dict and later used to populate the DGL graph
 inst_dict, endpoints, srcs, dsts, fanin_dict, fanout_dict = \
 iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell_name_dict)
 ################################################
@@ -223,8 +236,16 @@ for i_episode in range(num_episodes):
     ##############################
     #select and perform an action#
     ##############################
+    # CRITICAL PATH FINDING: Identify nodes with worst timing slack
+    # Uses torch.topk() to find gates with smallest slack values (timing violations)
+    # Number of nodes increases with episode: TOP_N_NODES * (1 + 0.01 * i_episode)
     critical_nodes = get_critical_path_nodes(episode_G, i_episode, TOP_N_NODES, n_cells)
+    
+    # Create a subgraph focused on critical nodes and their 2-hop neighbors
+    # This reduces the action space for the RL agent to focus on timing-critical regions
     critical_graph = get_subgraph(episode_G, critical_nodes)
+    
+    # Extract state features from the critical subgraph for the RL agent
     state  = get_state(critical_graph, n_state, n_cells, n_features)
     action, total_taken, steps_done, random_taken\
                         = select_action(critical_graph, inference, total_taken,\

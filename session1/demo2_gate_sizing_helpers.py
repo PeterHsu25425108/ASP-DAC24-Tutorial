@@ -111,19 +111,42 @@ def get_type(cell_type, cell_dict, cell_name_dict):
     return None,None
 
 def pin_properties(dbpin, CLKset, ord_design, timing):
+  """
+  Extracts timing properties from OpenROAD for a given pin.
+  
+  How data is obtained from OpenROAD:
+  1. Uses timing.getPinSlack() to get slack from OpenSTA timing engine
+  2. Uses timing.getPinSlew() to get signal transition time
+  3. Uses timing.getPortCap() to calculate total load capacitance
+  
+  Args:
+    dbpin: OpenDB pin object (ITerm) to query
+    CLKset: Clock period settings
+    ord_design: OpenROAD Design object
+    timing: OpenROAD Timing object (OpenSTA)
+    
+  Returns:
+    tuple: (slack, slew, load) - timing properties for the pin
+  """
   ITerms = dbpin.getNet().getITerms()
-  #slack
+  
+  # Get slack from OpenROAD timing engine (OpenSTA)
+  # slack = required_time - arrival_time (negative means timing violation)
+  # Query both rise and fall slack, take the worst (minimum)
   slack = min(timing.getPinSlack(dbpin, timing.Fall, timing.Max), timing.getPinSlack(dbpin, timing.Rise, timing.Max))
   if slack < -0.5*CLKset[0]:
     slack = 0
-  #slew
+  
+  # Get slew (transition time) from OpenROAD timing engine
   slew = timing.getPinSlew(dbpin)  
-  #load
-  #Corners = timing.getCorners()
+  
+  # Calculate total load capacitance driven by this pin
+  # Sum up input capacitances of all fanout pins across all timing corners
   load = 0
   for ITerm in ITerms:
     if ITerm.isInputSignal():
       new_load = 0
+      # Check all timing corners (e.g., fast, typical, slow) and use max load
       for corner in timing.getCorners():
         tmp_load = timing.getPortCap(ITerm, corner, timing.Max)
         if tmp_load > new_load:
@@ -237,10 +260,35 @@ def get_subgraph(graph, nodes):
   return subgraph
 
 def get_critical_path_nodes(graph, ep_num, TOP_N_NODES, n_cells):
+  """
+  Identifies critical path nodes (gates with worst timing slack).
+  
+  How critical paths are found:
+  1. Dynamically calculates the number of nodes to consider based on episode number
+  2. Uses torch.topk() to find nodes with the smallest (most negative) slack values
+  3. Filters to keep only nodes with negative slack (timing violations)
+  4. If no violations exist, returns all nodes for area optimization
+  
+  Args:
+    graph: DGL graph containing circuit netlist with slack values in ndata
+    ep_num: Current episode number (increases scope over time)
+    TOP_N_NODES: Base number of critical nodes (default: 100)
+    n_cells: Number of cell types
+    
+  Returns:
+    critical_path: Tensor of node indices representing critical path nodes
+  """
+  # Gradually increase the number of critical nodes considered as training progresses
   topk = min(len(graph.ndata['slack'])-1 , int(TOP_N_NODES*(1+0.01*ep_num)))
+  
+  # Find nodes with smallest slack values using torch.topk (largest=False gets minimums)
+  # slack values come from OpenROAD timing analysis via getPinSlack() API
   min_slacks, critical_path = torch.topk(graph.ndata['slack'], topk, largest=False)
+  
+  # Keep only nodes with negative slack (timing violations)
   critical_path = critical_path[min_slacks<0]
 
+  # Fallback: if no timing violations, optimize all nodes for area
   if critical_path.numel() <=0:
     critical_path = torch.arange(0,graph.num_nodes())
 
@@ -507,27 +555,93 @@ clk_init = clk_final + clk_range
 
 
 def load_design(path):
+  """
+  Loads the design into OpenROAD and initializes timing analysis.
+  
+  How data is obtained from OpenROAD:
+  1. Creates Tech object and loads Liberty (.lib) and LEF files for technology info
+  2. Creates Design object and loads Verilog netlist
+  3. Creates Timing object (OpenSTA) for timing analysis
+  4. Sets clock constraints using TCL commands
+  5. Returns database objects for querying circuit properties
+  
+  Args:
+    path: Path to the tutorial directory
+    
+  Returns:
+    tuple: (ord_tech, ord_design, timing, db, chip, block, nets)
+           - ord_tech: Technology information
+           - ord_design: Design object
+           - timing: Timing analysis engine (OpenSTA)
+           - db: OpenDB database
+           - chip: Top-level chip object
+           - block: Design block with instances and nets
+           - nets: List of all nets in the design
+  """
+  # Create technology object
   ord_tech = Tech()
+  
+  # Define paths to technology files
   lib_file = path/"platforms/lib/NangateOpenCellLibrary_typical.lib"
   lef_file = path/"platforms/lef/NangateOpenCellLibrary.macro.lef"
   tech_lef_file = path/"platforms/lef/NangateOpenCellLibrary.tech.lef"
+  
+  # Load technology files into OpenROAD
+  # Liberty file: timing and power characterization
   ord_tech.readLiberty(lib_file.as_posix())
+  # LEF files: physical layout information (layers, cells)
   ord_tech.readLef(tech_lef_file.as_posix())
   ord_tech.readLef(lef_file.as_posix())
+  
+  # Create design and timing analysis objects
   ord_design = Design(ord_tech)
-  timing = Timing(ord_design)
+  timing = Timing(ord_design)  # OpenSTA timing engine
+  
+  # Load netlist (Verilog file)
   design_file = path/f"designs/{design}_{semi_opt_clk}.v"
   ord_design.readVerilog(design_file.as_posix())
-  ord_design.link(design)
+  ord_design.link(design)  # Link top module
+  
+  # Set clock constraint using TCL command through OpenROAD
   ord_design.evalTclString("create_clock [get_ports i_clk] -name core_clock -period " + str(clk_init*1e-9))
+  
+  # Get OpenDB database objects for querying and modification
   db = ord.get_db()
   chip = db.getChip()
-  block = ord.get_db_block()
-  nets = block.getNets()
+  block = ord.get_db_block()  # Contains instances, nets, pins
+  nets = block.getNets()  # Get all nets in the design
+  
   return ord_tech, ord_design, timing, db, chip, block, nets
 
 
 def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell_name_dict):
+  """
+  Traverses the netlist and extracts circuit properties from OpenROAD to build a graph.
+  
+  How data is obtained from OpenROAD:
+  1. Iterates through all nets using block.getNets()
+  2. For each net, gets connected pins using net.getITerms()
+  3. Extracts instance properties using OpenDB APIs:
+     - inst.getMaster() for cell type
+     - master.getWidth()/getHeight() for area
+  4. Extracts timing properties using pin_properties() which calls OpenSTA APIs
+  5. Builds connectivity graph (srcs, dsts) for fanin/fanout relationships
+  
+  Args:
+    ord_design: OpenROAD Design object
+    timing: OpenROAD Timing object (OpenSTA)
+    nets: List of all nets from block.getNets()
+    block: Design block containing instances
+    cell_dict: Dictionary of cell types
+    cell_name_dict: Lookup table for cell names
+    
+  Returns:
+    tuple: (inst_dict, endpoints, srcs, dsts, fanin_dict, fanout_dict)
+           - inst_dict: Properties of all instances (slack, slew, load, area)
+           - endpoints: List of endpoint nodes (flip-flops)
+           - srcs, dsts: Graph connectivity (source and destination indices)
+           - fanin_dict, fanout_dict: Fanin/fanout relationships
+  """
   #This must eventually be put into a create graph function.
   #source and destination instances for the graph function.
   srcs = []
@@ -539,20 +653,27 @@ def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell
   fanout_dict = {}
   #storing all the endpoints(here they are flipflops)
   endpoints = []
+  
+  # Traverse all nets using OpenDB API
   for net in nets:
+    # Get all pins (ITerms) connected to this net
     iterms = net.getITerms()
     net_srcs = []
     net_dsts = []
+    
     # create/update the instance dictionary for each net.
     for s_iterm in iterms:
+      # Extract instance information using OpenDB APIs
       inst = s_iterm.getInst()
       inst_name = s_iterm.getInst().getName()
       term_name = s_iterm.getInst().getName() + "/" + s_iterm.getMTerm().getName()
-      cell_type = s_iterm.getInst().getMaster().getName()
+      cell_type = s_iterm.getInst().getMaster().getName()  # Library cell type
   
       if inst_name not in inst_dict:
+        # Get instance and master (library cell) from OpenDB
         i_inst = block.findInst(inst_name)
         m_inst = i_inst.getMaster()
+        # Calculate area from physical dimensions
         area = m_inst.getWidth() * m_inst.getHeight()
         inst_dict[inst_name] = {
           'idx':len(inst_dict),
@@ -564,11 +685,15 @@ def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell
           'cin':0,
           'area': area}
       if s_iterm.isInputSignal():
+        # Input pin: this is a destination (sink) in the graph
         net_dsts.append((inst_dict[inst_name]['idx'],term_name))
         if inst_dict[inst_name]['cell_type'][0] == 16: # check for flipflops
           endpoints.append(inst_dict[inst_name]['idx'])
       elif s_iterm.isOutputSignal():
+        # Output pin: this is a source (driver) in the graph
         net_srcs.append((inst_dict[inst_name]['idx'],term_name))
+        # Extract timing properties from OpenROAD using pin_properties()
+        # This calls OpenSTA APIs: getPinSlack(), getPinSlew(), getPortCap()
         (inst_dict[inst_name]['slack'],
          inst_dict[inst_name]['slew'],
          inst_dict[inst_name]['load'])= pin_properties(s_iterm, CLKset, ord_design, timing)
