@@ -42,7 +42,12 @@ import random
 from itertools import count
 import dgl
 import copy
+import os
 from pathlib import Path
+import sys
+import glob
+from glob import glob
+
 
 # replay memory
 class ReplayMemory(object):
@@ -95,8 +100,21 @@ class DQN(nn.Module):
     return x
 
 def get_type(cell_type, cell_dict, cell_name_dict):
-  cell, drive = cell_type.split("_")
-  drive = "_"+drive
+  """Extract cell index and size from full cell name.
+  
+  Handles ASAP7 naming: INVx2_ASAP7_75t_R -> base_name='INV', size='x2'
+  """
+  import re
+  
+  # Parse ASAP7 cell name: <CELLNAME>x<SIZE>_ASAP7_75t_<VT>
+  match = re.match(r'([A-Za-z0-9_]+?)(x[p0-9]+(?:p[0-9]+)?)_ASAP7', cell_type)
+  if not match:
+    print(f"Could not parse cell type: {cell_type}")
+    return None, None
+  
+  cell = match.group(1)  # Base name (e.g., 'INV')
+  drive = match.group(2)  # Size suffix (e.g., 'x2')
+  
   if cell in cell_name_dict:
     cell_values = cell_dict[cell_name_dict[cell]]
     if drive in cell_values['sizes']:
@@ -104,7 +122,7 @@ def get_type(cell_type, cell_dict, cell_name_dict):
       return int(cell_name_dict[cell]), idx
     else:
       print("Drive strength "+drive+" not found in cell :"+cell)
-      print("Possible sizes"+cell_values['sizes'])
+      print("Possible sizes", cell_values['sizes'])
       return None,None
   else:
     print("cell: "+cell+" not in dictionary")
@@ -409,15 +427,15 @@ def env_reset(reset_state = None, episode_num = None, cell_name_dict = None,\
   episode_G = copy.deepcopy(G)
   episode_inst_dict = copy.deepcopy(inst_dict)
 
-  if episode_num is not None:
+  # if episode_num is not None:
 
-    if episode_num<CLK_DECAY_STRT:
-      clk = clk_init
-    elif episode_num<CLK_DECAY+CLK_DECAY_STRT:
-      clk = clk_init - clk_range*(episode_num -CLK_DECAY_STRT) /CLK_DECAY
-    else:
-      clk = clk_final
-    ord_design.evalTclString("create_clock [get_ports i_clk] -name core_clock -period " + str(clk*1e-9))
+  #   if episode_num<CLK_DECAY_STRT:
+  #     clk = clk_init
+  #   elif episode_num<CLK_DECAY+CLK_DECAY_STRT:
+  #     clk = clk_init - clk_range*(episode_num -CLK_DECAY_STRT) /CLK_DECAY
+  #   else:
+  #     clk = clk_final
+  #   ord_design.evalTclString("create_clock [get_ports i_clk] -name core_clock -period " + str(clk*1e-9))
 
   for i in range(len(inst_names)):
     inst_name = inst_names[i]
@@ -658,13 +676,14 @@ def load_design(path):
   2. Creates Design object and loads Verilog netlist
   3. Creates Timing object (OpenSTA) for timing analysis
   4. Sets clock constraints using TCL commands
-  5. Returns database objects for querying circuit properties
+  5. Builds cell_dict dynamically from library (no JSON needed)
+  6. Returns database objects for querying circuit properties
   
   Args:
     path: Path to the tutorial directory
     
   Returns:
-    tuple: (ord_tech, ord_design, timing, db, chip, block, nets)
+    tuple: (ord_tech, ord_design, timing, db, chip, block, nets, cell_dict, cell_name_dict)
            - ord_tech: Technology information
            - ord_design: Design object
            - timing: Timing analysis engine (OpenSTA)
@@ -672,6 +691,8 @@ def load_design(path):
            - chip: Top-level chip object
            - block: Design block with instances and nets
            - nets: List of all nets in the design
+           - cell_dict: Cell library dictionary (built from OpenROAD)
+           - cell_name_dict: Cell name lookup table
   """
   # Create technology object
   ord_tech = Tech()
@@ -706,7 +727,126 @@ def load_design(path):
   block = ord.get_db_block()  # Contains instances, nets, pins
   nets = block.getNets()  # Get all nets in the design
   
-  return ord_tech, ord_design, timing, db, chip, block, nets
+  # Build cell dictionary dynamically from OpenROAD library (no JSON needed)
+  cell_dict, cell_name_dict = build_cell_dict_from_openroad(db)
+  print(f"Built cell dictionary with {len(cell_dict)} cell types")
+  
+  return ord_tech, ord_design, timing, db, chip, block, nets, cell_dict, cell_name_dict
+
+
+def build_cell_dict_from_openroad(db):
+  """
+  Builds cell dictionary dynamically from OpenROAD's database, eliminating the need for JSON parsing.
+  
+  How data is obtained from OpenROAD:
+  1. Uses db.getLibs() to get all libraries, then lib.getMasters() to get all library cells
+  2. For each master cell:
+     - Groups cells by base name (e.g., "INVx2_ASAP7_75t_R", "INVx4_ASAP7_75t_R" -> "INV")
+     - Extracts size suffix (e.g., "x2", "x4", "xp33" for 0.33x)
+     - Gets output pin name using master.getMTerms()
+  3. Organizes cells by type index and size variants
+  
+  Args:
+    db: OpenDB database object
+    
+  Returns:
+    tuple: (cell_dict, cell_name_dict)
+           - cell_dict: Dictionary indexed by cell type index containing:
+               * name: Base cell name (e.g., "INV")
+               * sizes: List of size suffixes (e.g., ["xp33", "x1", "x2", "x4"])
+               * sizesi: List of size floats (e.g., [0.33, 1, 2, 4])
+               * n_sizes: Number of size variants
+               * out_pin: Output pin name (e.g., "/Y")
+               * c_in: List of placeholder zeros (actual capacitance extracted during timing analysis)
+           - cell_name_dict: Lookup table mapping cell base name to index
+  """
+  from collections import defaultdict
+  import re
+  
+  # Get all library cells from OpenROAD database
+  # Access masters through libraries
+  libs = db.getLibs()
+  masters = []
+  for lib in libs:
+    masters.extend(lib.getMasters())
+  
+  # Group cells by base name (without size suffix)
+  cell_groups = defaultdict(list)
+  
+  for master in masters:
+    master_name = master.getName()
+    # Skip special cells (filler, decap, tap, antenna - but keep TIEHI/TIELO)
+    if any(x in master_name.upper() for x in ["FILL", "DECAP", "ANTENNA", "TAP"]):
+      continue
+    
+    # Extract base name and size for ASAP7 cells (e.g., "INVx2_ASAP7_75t_R" -> "INV", "x2")
+    # Pattern: <CELLNAME>x<SIZE>_ASAP7_75t_<VT>
+    match = re.match(r'([A-Za-z0-9_]+?)(x[p0-9]+(?:p[0-9]+)?)_ASAP7', master_name)
+    if match:
+      base_name = match.group(1)
+      size_suffix = match.group(2)
+      cell_groups[base_name].append((size_suffix, master))
+  
+  # Build cell_dict with indexed entries
+  cell_dict = {}
+  cell_name_dict = {}
+  
+  def parse_size(size_suffix):
+    """Convert size suffix to float (e.g., 'x2' -> 2.0, 'xp33' -> 0.33, 'x1p5' -> 1.5)"""
+    size_str = size_suffix[1:]  # Remove 'x' prefix
+    if 'p' in size_str:
+      # Handle decimal notation (xp33 -> 0.33, x1p5 -> 1.5)
+      parts = size_str.split('p')
+      if parts[0]:  # x1p5 case
+        return float(parts[0]) + float(parts[1]) / (10 ** len(parts[1]))
+      else:  # xp33 case
+        return float(parts[1]) / (10 ** len(parts[1]))
+    else:
+      return float(size_str)
+  
+  for idx, (base_name, cells) in enumerate(sorted(cell_groups.items())):
+    # Sort cells by size
+    cells_sorted = sorted(cells, key=lambda x: parse_size(x[0]))
+    
+    sizes = []
+    sizesi = []
+    c_in_list = []
+    out_pin = None
+    
+    for size_suffix, master in cells_sorted:
+      sizes.append(size_suffix)
+      # Extract numeric size
+      size_num = parse_size(size_suffix)
+      sizesi.append(size_num)
+      
+      # Get output pin name
+      if out_pin is None:
+        for mterm in master.getMTerms():
+          io_type = mterm.getIoType()
+          # Handle both string and enum types
+          io_type_str = io_type if isinstance(io_type, str) else str(io_type)
+          if "OUTPUT" in io_type_str:
+            out_pin = "/" + mterm.getName()
+            break
+      
+      # Note: Input capacitance values (c_in) are not extracted here as they require
+      # timing library information that's better obtained during actual timing analysis.
+      # Using placeholder 0.0 - the actual values aren't critical for gate sizing algorithm
+      c_in_list.append(0.0)
+    
+    # Store in cell_dict
+    cell_dict[str(idx)] = {
+      "name": base_name,
+      "sizes": sizes,
+      "sizesi": sizesi,
+      "n_sizes": len(sizes),
+      "out_pin": out_pin if out_pin else "/Y",  # Default to /Y for ASAP7
+      "c_in": c_in_list
+    }
+    
+    cell_name_dict[base_name] = str(idx)
+  
+  return cell_dict, cell_name_dict
 
 
 def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell_name_dict):
@@ -750,7 +890,14 @@ def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell
   endpoints = []
   
   # Traverse all nets using OpenDB API
-  for net in nets:
+  print(f"Starting netlist traversal...")
+  total_nets = len(list(nets))
+  print(f"Total nets to process: {total_nets}")
+  
+  for net_idx, net in enumerate(nets):
+    # Progress update every 5000 nets
+    if net_idx > 0 and net_idx % 5000 == 0:
+      print(f"Processed {net_idx}/{total_nets} nets, {len(inst_dict)} instances so far...")
     # Get all pins (ITerms) connected to this net
     iterms = net.getITerms()
     net_srcs = []
@@ -763,6 +910,10 @@ def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell
       inst_name = s_iterm.getInst().getName()
       term_name = s_iterm.getInst().getName() + "/" + s_iterm.getMTerm().getName()
       cell_type = s_iterm.getInst().getMaster().getName()  # Library cell type
+      
+      # Skip special cells that don't have size variants (tapcells, fillers, SRAMs, etc.)
+      if any(x in cell_type.upper() for x in ["TAPCELL", "FILLER", "ENDCAP", "SRAM", "FAKERAM"]):
+        continue
   
       if inst_name not in inst_dict:
         # Get instance and master (library cell) from OpenDB
@@ -789,11 +940,12 @@ def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell
         net_srcs.append((inst_dict[inst_name]['idx'],term_name))
         # Extract timing properties from OpenROAD using pin_properties()
         # This calls OpenSTA APIs: getPinSlack(), getPinSlew(), getPortCap()
+        if net_idx > 0 and net_idx % 10000 == 0:
+          print(f"  Extracting timing properties at net {net_idx}...")
         (inst_dict[inst_name]['slack'],
          inst_dict[inst_name]['slew'],
          inst_dict[inst_name]['load'])= pin_properties(s_iterm, CLKset, ord_design, timing)
-      else:
-        print("Should not be here")
+      # else: Pin is neither input nor output (power, clock, etc.) - skip it
     # list the connections for the graph creation step and the fainin/fanout dictionaries
     for src,src_term in net_srcs:
       for dst,dst_term in net_dsts:
@@ -809,6 +961,11 @@ def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell
           fanin_dict[dst_key].append(src_key)
         else:
           fanin_dict[dst_key] = [src_key]
+  
+  print(f"Completed netlist traversal!")
+  print(f"Total instances: {len(inst_dict)}")
+  print(f"Total endpoints (flip-flops): {len(endpoints)}")
+  print(f"Total graph edges: {len(srcs)}")
   return inst_dict, endpoints, srcs, dsts, fanin_dict, fanout_dict
 
 

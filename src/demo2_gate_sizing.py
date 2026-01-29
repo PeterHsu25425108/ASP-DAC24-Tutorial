@@ -57,9 +57,9 @@ import argparse
 ###############
 #path argumant#
 ###############
-parser = argparse.ArgumentParser(description="path of your ASPDAC2024-Turotial clone (must include /ASPDAC2024-Turotial)")
-parser.add_argument("--path", type = Path, default='./', action = 'store')
-pyargs = parser.parse_args()
+# parser = argparse.ArgumentParser(description="path of your ASPDAC2024-Turotial clone (must include /ASPDAC2024-Turotial)")
+# parser.add_argument("--path", type = Path, default='./', action = 'store')
+# pyargs = parser.parse_args()
 ###################
 #set up matplotlib#
 ###################
@@ -69,20 +69,9 @@ if is_ipython:
 ##################################
 #use gpu or cpu(cpu for tutorial)#
 ##################################
-#device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 device = torch.device("cpu")
 #print(device)
-####################################################
-#load cell dictionary with name and size properties#
-####################################################
-with open(pyargs.path/'platforms/preprocessed_cell_dictionary.json','r') as f:
-  cell_dict = json.load(f)
-###################################################
-#create a lookup table for the index form the name#
-###################################################
-cell_name_dict = {}
-for k,v in cell_dict.items():
-  cell_name_dict[v['name']] = k
 ########################################
 #load design using openroad python apis#
 ########################################
@@ -92,13 +81,13 @@ for k,v in cell_dict.items():
 #   1. Load Liberty (.lib) and LEF files for technology information
 #   2. Read Verilog netlist and link top module
 #   3. Set clock constraints using TCL commands
-#   4. Return database objects for querying circuit properties
-# input_dir=sys.argv[1]
-# platform_dir=sys.argv[2]
-# output_dir=sys.argv[3]
-# top_module=sys.argv[4]
-# ord_tech, ord_design, timing, db, chip, block, nets, cell_dict, cell_name_dict = load_ISPD_design(input_dir, platform_dir, output_dir, top_module)
-ord_tech, ord_design, timing, db, chip, block, nets = load_design(pyargs.path)
+#   4. Build cell_dict dynamically from the library (no JSON needed)
+#   5. Return database objects for querying circuit properties
+input_dir=sys.argv[1]
+platform_dir=sys.argv[2]
+output_dir=sys.argv[3]
+top_module=sys.argv[4]
+ord_tech, ord_design, timing, db, chip, block, nets, cell_dict, cell_name_dict = load_ISPD_design(input_dir, platform_dir, output_dir, top_module)
 ################################################################################
 #srcs, dsts : source and destination instances for the graph function.         #
 #inst_dict : Dictionary that stores all the properties of the instances.       #
