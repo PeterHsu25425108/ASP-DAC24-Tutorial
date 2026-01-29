@@ -553,6 +553,101 @@ clk_final = CLKset[0]
 clk_range = 0.98*(float(semi_opt_clk) - CLKset[0])
 clk_init = clk_final + clk_range
 
+def load_ISPD_design(input_dir, platform_dir, output_dir, top_module):
+  """
+  Loads the design into OpenROAD and initializes timing analysis.
+  
+  How data is obtained from OpenROAD:
+  1. Creates Tech object and loads Liberty (.lib) and LEF files for technology info
+  2. Creates Design object and loads Verilog netlist
+  3. Creates Timing object (OpenSTA) for timing analysis
+  4. Sets clock constraints using TCL commands
+  5. Builds cell_dict dynamically from library (no JSON needed)
+  6. Returns database objects for querying circuit properties
+  
+  Args:
+    input_dir: Path to input files (verilog, def, sdc)
+    platform_dir: Path to platform files (lib, lef, util)
+    output_dir: Path for output files
+    top_module: Top module name
+    
+  Returns:
+    tuple: (ord_tech, ord_design, timing, db, chip, block, nets, cell_dict, cell_name_dict)
+           - ord_tech: Technology information
+           - ord_design: Design object
+           - timing: Timing analysis engine (OpenSTA)
+           - db: OpenDB database
+           - chip: Top-level chip object
+           - block: Design block with instances and nets
+           - nets: List of all nets in the design
+           - cell_dict: Cell library dictionary (built from OpenROAD)
+           - cell_name_dict: Cell name lookup table
+  """
+  # Create technology object
+  ord_tech = Tech()
+  
+  # Define paths to technology files
+  lef_dir = Path(platform_dir) / "lef"
+  lib_dir = Path(platform_dir) / "lib"
+  util_dir = Path(platform_dir) / "util"
+
+  lefFiles = lef_dir.glob("*.lef")
+  libFiles = lib_dir.glob("*.lib")
+  # tech_lef_file = path/"platforms/lef/NangateOpenCellLibrary.tech.lef"
+  
+  # Load technology files into OpenROAD
+  # (The techlef file is included in Platform/ASAP7/lef along with the designs' lef files, so we read all the lef files in the lef directory)
+  for lef in lefFiles:
+      print("Lef path: ", str(lef))
+      ord_tech.readLef(str(lef))
+      print("Read lef: ", str(lef))
+
+  # read liberty files    
+  for lib in libFiles:
+      print("Lib path: ", str(lib))
+      ord_tech.readLiberty(str(lib))
+      print("Read lib: ", str(lib))
+  
+  # Create design and timing analysis objects
+  ord_design = Design(ord_tech)
+  
+  # Load netlist (Verilog file)
+  # ord_design.readVerilog(f"{input_dir}/contest.v")
+  # ord_design.link(top_module)  # Link top module
+  
+  ord_design.evalTclString(f"read_verilog {input_dir}/contest.v")
+  print("Read verilog")
+  ord_design.evalTclString(f"read_def {input_dir}/contest.def")
+  print("Read def")
+  
+  # read sdc file
+  sdcFile = f"{input_dir}/contest.sdc"
+  ord_design.evalTclString("read_sdc %s"%sdcFile)
+  print("Read SDC")
+  
+  # read rc file
+  rcFile = f"{util_dir}/setRC.tcl"
+  # ord_design.evalTclString("set rc_file %s"%rcFile)
+  ord_design.evalTclString(f"source {rcFile}")
+  print("Read rc")
+
+  # set units
+  ord_design.evalTclString("set_cmd_units -time ns -capacitance pF -current mA -voltage V -resistance kOhm -distance um -power mW")
+  ord_design.evalTclString("set_units -power mW")
+  
+  # Get OpenDB database objects for querying and modification
+  db = ord.get_db()
+  chip = db.getChip()
+  block = ord.get_db_block()  # Contains instances, nets, pins
+  nets = block.getNets()  # Get all nets in the design
+  
+  timing = Timing(ord_design)  # OpenSTA timing engine
+  
+  # Build cell dictionary dynamically from OpenROAD library (no JSON needed)
+  cell_dict, cell_name_dict = build_cell_dict_from_openroad(db)
+  print(f"Built cell dictionary with {len(cell_dict)} cell types")
+  
+  return ord_tech, ord_design, timing, db, chip, block, nets, cell_dict, cell_name_dict
 
 def load_design(path):
   """

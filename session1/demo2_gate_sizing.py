@@ -93,6 +93,11 @@ for k,v in cell_dict.items():
 #   2. Read Verilog netlist and link top module
 #   3. Set clock constraints using TCL commands
 #   4. Return database objects for querying circuit properties
+# input_dir=sys.argv[1]
+# platform_dir=sys.argv[2]
+# output_dir=sys.argv[3]
+# top_module=sys.argv[4]
+# ord_tech, ord_design, timing, db, chip, block, nets, cell_dict, cell_name_dict = load_ISPD_design(input_dir, platform_dir, output_dir, top_module)
 ord_tech, ord_design, timing, db, chip, block, nets = load_design(pyargs.path)
 ################################################################################
 #srcs, dsts : source and destination instances for the graph function.         #
@@ -390,3 +395,7 @@ data_v_episode = np.array(data_v_episode)
 G.num_nodes()
 #print(max(episode_reward))
 print("#################Done#################")
+
+# Output def and verilog
+ord_design.writeDef("result.def")
+ord_design.evalTclString("write_verilog %s.v"%"designName")
