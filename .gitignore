@@ -1,3 +1,6 @@
 __pycache__
 .*.sw[pno]
 .vscode/
+output_file/
+*.prof
+docker/*

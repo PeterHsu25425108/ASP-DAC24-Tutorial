@@ -69,8 +69,8 @@ if is_ipython:
 ##################################
 #use gpu or cpu(cpu for tutorial)#
 ##################################
-#device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-device = torch.device("cpu")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cpu")
 #print(device)
 ####################################################
 #load cell dictionary with name and size properties#
@@ -133,10 +133,10 @@ G.ndata['max_size'] = torch.tensor([cell_dict[str(inst_dict[x]['cell_type'][0])]
 G.edata['types'] = torch.cat((torch.zeros(len(srcs),dtype=torch.long),torch.ones(len(dsts),dtype=torch.long)),0)
 # normalization parameters
 norm_data = {
-  'max_area' : 1.0*np.max(G.ndata['area'].numpy()),
+  'max_area' : 1.0*np.max(G.ndata['area'].cpu().numpy()),
   'clk_period' : CLKset[0],
-  'max_slew' : 1.0*np.max(G.ndata['slew'].numpy()),
-  'max_load' : 1.0*np.max(G.ndata['load'].numpy()),
+  'max_slew' : 1.0*np.max(G.ndata['slew'].cpu().numpy()),
+  'max_load' : 1.0*np.max(G.ndata['load'].cpu().numpy()),
 }
 #print(norm_data)
 G.ndata['area'] = G.ndata['area']/norm_data['max_area']
@@ -188,8 +188,8 @@ episode_durations = []
 episode_inst_dict = copy.deepcopy(inst_dict)
 episode_G = copy.deepcopy(G)
 
-print("Worst Negative slack initial:", torch.min(episode_G.ndata['slack']).numpy()*norm_data['clk_period'])
-print("Total Negative slack initial:", torch.sum(torch.min(episode_G.ndata['slack'],torch.zeros_like(episode_G.ndata['slack']))).numpy())
+print("Worst Negative slack initial:", torch.min(episode_G.ndata['slack']).cpu().item()*norm_data['clk_period'])
+print("Total Negative slack initial:", torch.sum(torch.min(episode_G.ndata['slack'],torch.zeros_like(episode_G.ndata['slack']))).cpu().item())
 print("##############################################")
 episode_reward = []
 update_loss = []

@@ -71,7 +71,7 @@ if is_ipython:
 ##################################
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 device = torch.device("cpu")
-#print(device)
+print(device)
 ########################################
 #load design using openroad python apis#
 ########################################
@@ -87,6 +87,12 @@ input_dir=sys.argv[1]
 platform_dir=sys.argv[2]
 output_dir=sys.argv[3]
 top_module=sys.argv[4]
+
+print(input_dir)
+print(platform_dir)
+print(output_dir)
+print(top_module)
+
 ord_tech, ord_design, timing, db, chip, block, nets, cell_dict, cell_name_dict = load_ISPD_design(input_dir, platform_dir, output_dir, top_module)
 ################################################################################
 #srcs, dsts : source and destination instances for the graph function.         #
@@ -122,10 +128,10 @@ G.ndata['max_size'] = torch.tensor([cell_dict[str(inst_dict[x]['cell_type'][0])]
 G.edata['types'] = torch.cat((torch.zeros(len(srcs),dtype=torch.long),torch.ones(len(dsts),dtype=torch.long)),0)
 # normalization parameters
 norm_data = {
-  'max_area' : 1.0*np.max(G.ndata['area'].numpy()),
+  'max_area' : 1.0*np.max(G.ndata['area'].cpu().numpy()),
   'clk_period' : CLKset[0],
-  'max_slew' : 1.0*np.max(G.ndata['slew'].numpy()),
-  'max_load' : 1.0*np.max(G.ndata['load'].numpy()),
+  'max_slew' : 1.0*np.max(G.ndata['slew'].cpu().numpy()),
+  'max_load' : 1.0*np.max(G.ndata['load'].cpu().numpy()),
 }
 #print(norm_data)
 G.ndata['area'] = G.ndata['area']/norm_data['max_area']
@@ -177,8 +183,8 @@ episode_durations = []
 episode_inst_dict = copy.deepcopy(inst_dict)
 episode_G = copy.deepcopy(G)
 
-print("Worst Negative slack initial:", torch.min(episode_G.ndata['slack']).numpy()*norm_data['clk_period'])
-print("Total Negative slack initial:", torch.sum(torch.min(episode_G.ndata['slack'],torch.zeros_like(episode_G.ndata['slack']))).numpy())
+print("Worst Negative slack initial:", torch.min(episode_G.ndata['slack']).cpu().numpy()*norm_data['clk_period'])
+print("Total Negative slack initial:", torch.sum(torch.min(episode_G.ndata['slack'],torch.zeros_like(episode_G.ndata['slack']))).cpu().numpy())
 print("##############################################")
 episode_reward = []
 update_loss = []
@@ -211,9 +217,9 @@ for i_episode in range(num_episodes):
   ######################################
   #Initialize the environment and state#
   ######################################
-  episode_G, episode_inst_dict, working_clk = env_reset(reset_state, i_episode,\
-      cell_name_dict, CLKset, ord_design, timing, G, inst_dict, CLK_DECAY, CLK_DECAY_STRT,\
-      clk_init, clk_range, clk_final, inst_names, block, cell_dict, norm_data, device)
+  episode_G, episode_inst_dict = env_reset(reset_state, i_episode,\
+    cell_name_dict, CLKset, ord_design, timing, G, inst_dict, CLK_DECAY, CLK_DECAY_STRT,\
+    clk_init, clk_range, clk_final, inst_names, block, cell_dict, norm_data, device)
   best_cost = calc_cost(episode_G, Slack_Lambda)
   cumulative_reward = 0
   count_bads = 0
@@ -253,6 +259,7 @@ for i_episode in range(num_episodes):
       if cost<best_cost:
         best_cost = cost
         reset_state = get_state_cells(episode_inst_dict, inst_names, cell_dict)
+      print("No valid actions can be taken, resetting to best known state.")
       break
     ###############################################
     #get reward and next state based on the action#
@@ -268,11 +275,14 @@ for i_episode in range(num_episodes):
     done = 0
     solution = []
     sizes = []
-    for i in range(len(episode_G.ndata['cell_types'][:,1].T)):
-      if episode_G.ndata['cell_types'][:,1].T[i] > 0:
+    # Avoid deprecated use of .T on non-2D tensors; iterate over nodes explicitly
+    for i in range(episode_G.ndata['cell_types'].shape[0]):
+      val = episode_G.ndata['cell_types'][i, 1].item()
+      if val > 0:
         solution.append(i)
-        sizes.append(int(episode_G.ndata['cell_types'][:,1].T[i]))
+        sizes.append(int(val))
     if t >= MAX_STEPS:
+      print("Max steps reached")
       done = 1
 
     if reward < 0:
@@ -318,15 +328,11 @@ for i_episode in range(num_episodes):
       if new_TNS >max_TNS:
         max_TNS = new_TNS
       
-      working_clk_period = (working_clk - new_WNS*norm_data['clk_period']).item()
-      if working_clk_period < min_working_clk:
-        min_working_clk = working_clk_period
-      
       working_area = new_area*norm_data['max_area']/(unit_micron*unit_micron)
-      
       point_time = time()
+      # Use the SDC-defined clock period for pareto points
       ret = pareto(pareto_points, pareto_cells, float(working_area),\
-                    working_clk_period, episode_inst_dict, inst_names,\
+                    norm_data['clk_period'], episode_inst_dict, inst_names,\
                     cell_dict, inst_dict, block, ord_design, timing)
       if(ret == 1):
         l= len(pareto_points)
@@ -345,7 +351,6 @@ for i_episode in range(num_episodes):
       new_WNS = torch.FloatTensor([0])
       new_TNS = torch.FloatTensor([0])
 
-    working_clk_period = (working_clk-(new_WNS)*norm_data['clk_period']).item()
     if t%10 == 9 :
       Slack_Lambda = update_lambda(Slack_Lambda, episode_G.ndata['slack'].to('cpu'), K)
     ############
@@ -376,7 +381,7 @@ for i_episode in range(num_episodes):
 ##############
 #end training#
 ##############
-#print(time())
+print(time() - train_start_time, "seconds for training")
 
 sorted_pareto_points = np.array(sorted(pareto_points, key=lambda x: x[0]))
 
@@ -384,7 +389,42 @@ data_v_episode = np.array(data_v_episode)
 G.num_nodes()
 #print(max(episode_reward))
 print("#################Done#################")
+  
+print("==== Restoring best-known configuration in OpenROAD DB ===")
+# restore best-known configuration in the OpenROAD DB before writing output
+best_cells = reset_state  # list of cell master names returned by get_state_cells()
+db = ord.get_db()
+for inst_name, master_name in zip(inst_names.values(), best_cells):
+    inst = block.findInst(inst_name)
+    if inst is None:
+        print(f"[WARN] instance {inst_name} not found")
+        continue
+    m = db.findMaster(master_name)
+    if m is None:
+        print(f"[WARN] master {master_name} not found in DB for instance {inst_name}")
+        continue
+    try:
+        inst.swapMaster(m)
+    except Exception as e:
+        print(f"[ERROR] swapMaster failed for {inst_name} -> {master_name}: {e}")
 
+print("=== Running detailed placement ===")
+# Run detailed placement to legalize the design after gate sizing
+site = ord_design.getBlock().getRows()[0].getSite()
+max_disp_x = int(ord_design.micronToDBU(0.5) / site.getWidth())
+max_disp_y = int(ord_design.micronToDBU(1) / site.getHeight())
+try:
+  ord_design.getOpendp().detailedPlacement(max_disp_x, max_disp_y)
+except Exception as e:
+  print("[WARN] detailedPlacement failed (DPL):", e)
+  print("You can inspect OpenROAD console output for 'DPL-0036' details.")
+  # Continue without failing so final outputs can still be written.
+
+
+print("=== Writing final output files ===")
 # Output def and verilog
-ord_design.writeDef("result.def")
-ord_design.evalTclString("write_verilog %s.v"%"designName")
+os.makedirs(os.path.dirname(f"{output_dir}/"), exist_ok=True)
+print(f"{output_dir}/contest.def")
+print(f"write_verilog {output_dir}/contest.v")
+ord_design.writeDef(f"{output_dir}/contest.def")
+ord_design.evalTclString(f"write_verilog {output_dir}/contest.v")

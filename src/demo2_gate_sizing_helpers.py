@@ -107,19 +107,21 @@ def get_type(cell_type, cell_dict, cell_name_dict):
   import re
   
   # Parse ASAP7 cell name: <CELLNAME>x<SIZE>_ASAP7_75t_<VT>
-  match = re.match(r'([A-Za-z0-9_]+?)(x[p0-9]+(?:p[0-9]+)?)_ASAP7', cell_type)
+  # match = re.match(r'([A-Za-z0-9_]+?)(x[p0-9]+(?:p[0-9]+)?)_ASAP7', cell_type)
+  match = re.match(r'([A-Za-z0-9_]+?)(x[p0-9]+(?:p[0-9]+)?)_ASAP7_75t_(.*)', cell_type)
   if not match:
     print(f"Could not parse cell type: {cell_type}")
     return None, None
   
   cell = match.group(1)  # Base name (e.g., 'INV')
   drive = match.group(2)  # Size suffix (e.g., 'x2')
+  vt = match.group(3)
   
   if cell in cell_name_dict:
     cell_values = cell_dict[cell_name_dict[cell]]
     if drive in cell_values['sizes']:
       idx = cell_values['sizes'].index(drive)
-      return int(cell_name_dict[cell]), idx
+      return int(cell_name_dict[cell]), idx #, vt
     else:
       print("Drive strength "+drive+" not found in cell :"+cell)
       print("Possible sizes", cell_values['sizes'])
@@ -356,11 +358,18 @@ def env_step(episode_G, graph, state, action, CLKset, ord_design, timing,\
 
   #replace the master node in the code and find the new slack,
   inst = block.findInst(inst_name)
-  n_master_name = cell_dict[str(cell_idx)]['name']+\
-                  cell_dict[str(cell_idx)]['sizes'][cell_size]
+  n_master_name = cell_dict[str(cell_idx)]['name']+cell_dict[str(cell_idx)]['sizes'][cell_size]  + "_ASAP7_75t_SL"
   db = ord.get_db()
   n_master = db.findMaster(n_master_name)
-  inst.swapMaster(n_master)
+  if n_master is None:
+    print(f"[ERROR] swapMaster: Master cell '{n_master_name}' not found in DB for instance '{inst_name}'. Skipping swap.")
+    print(f"  cell_idx: {cell_idx}, cell_size: {cell_size}, cell_dict entry: {cell_dict.get(str(cell_idx), {})}")
+    print(f"  Available master names: {[m.getName() for lib in db.getLibs() for m in lib.getMasters() if cell_dict[str(cell_idx)]['name'] in m.getName()]}")
+  else:
+    try:
+      inst.swapMaster(n_master)
+    except Exception as e:
+      print(f"[EXCEPTION] swapMaster failed for instance '{inst_name}' to master '{n_master_name}': {e}")
   dbpin = block.findITerm(inst_name + cell_dict[str(inst_dict[inst_name]['cell_type'][0])]['out_pin'])
   new_slack = min_slack(dbpin, timing)
 
@@ -427,15 +436,7 @@ def env_reset(reset_state = None, episode_num = None, cell_name_dict = None,\
   episode_G = copy.deepcopy(G)
   episode_inst_dict = copy.deepcopy(inst_dict)
 
-  # if episode_num is not None:
 
-  #   if episode_num<CLK_DECAY_STRT:
-  #     clk = clk_init
-  #   elif episode_num<CLK_DECAY+CLK_DECAY_STRT:
-  #     clk = clk_init - clk_range*(episode_num -CLK_DECAY_STRT) /CLK_DECAY
-  #   else:
-  #     clk = clk_final
-  #   ord_design.evalTclString("create_clock [get_ports i_clk] -name core_clock -period " + str(clk*1e-9))
 
   for i in range(len(inst_names)):
     inst_name = inst_names[i]
@@ -482,7 +483,7 @@ def env_reset(reset_state = None, episode_num = None, cell_name_dict = None,\
   episode_G.ndata['slew'] = new_slews.to(device)/ norm_data['max_slew']
   episode_G.ndata['load'] = new_loads.to(device)/ norm_data['max_load']
 
-  return episode_G, episode_inst_dict, clk
+  return episode_G, episode_inst_dict
 
 
 def calc_cost(ep_G, Slack_Lambda):
@@ -497,8 +498,13 @@ def get_state_cells(ep_dict, inst_names, cell_dict):
   for x in inst_names.values():
     cell_size = ep_dict[x]['cell_type'][1]
     cell_idx = ep_dict[x]['cell_type'][0]
+    cell_vt = ep_dict[x]['cell_type'][-1]
+    # Format example: AND2x2_ASAP7_75t_R
     cell_name = cell_dict[str(cell_idx)]['name']+\
-                cell_dict[str(cell_idx)]['sizes'][cell_size]
+                cell_dict[str(cell_idx)]['sizes'][cell_size]+\
+                  "_ASAP7_75t_"+\
+                  "SL"
+                  # cell_dict[str(cell_idx)][cell_vt]
     cells.append(cell_name)
   return cells
 
@@ -662,7 +668,7 @@ def load_ISPD_design(input_dir, platform_dir, output_dir, top_module):
   timing = Timing(ord_design)  # OpenSTA timing engine
   
   # Build cell dictionary dynamically from OpenROAD library (no JSON needed)
-  cell_dict, cell_name_dict = build_cell_dict_from_openroad(db)
+  cell_dict, cell_name_dict = build_cell_dict_from_openroad(db, timing)
   print(f"Built cell dictionary with {len(cell_dict)} cell types")
   
   return ord_tech, ord_design, timing, db, chip, block, nets, cell_dict, cell_name_dict
@@ -734,7 +740,7 @@ def load_design(path):
   return ord_tech, ord_design, timing, db, chip, block, nets, cell_dict, cell_name_dict
 
 
-def build_cell_dict_from_openroad(db):
+def build_cell_dict_from_openroad(db, timing):
   """
   Builds cell dictionary dynamically from OpenROAD's database, eliminating the need for JSON parsing.
   
@@ -781,11 +787,12 @@ def build_cell_dict_from_openroad(db):
     
     # Extract base name and size for ASAP7 cells (e.g., "INVx2_ASAP7_75t_R" -> "INV", "x2")
     # Pattern: <CELLNAME>x<SIZE>_ASAP7_75t_<VT>
-    match = re.match(r'([A-Za-z0-9_]+?)(x[p0-9]+(?:p[0-9]+)?)_ASAP7', master_name)
+    match = re.match(r'([A-Za-z0-9_]+?)(x[p0-9]+(?:p[0-9]+)?)_ASAP7_75t_(.*)', master_name)
     if match:
       base_name = match.group(1)
       size_suffix = match.group(2)
-      cell_groups[base_name].append((size_suffix, master))
+      vt_corner = match.group(3)
+      cell_groups[base_name].append((size_suffix, master, vt_corner))
   
   # Build cell_dict with indexed entries
   cell_dict = {}
@@ -812,12 +819,14 @@ def build_cell_dict_from_openroad(db):
     sizesi = []
     c_in_list = []
     out_pin = None
+    vt_corners = []
     
-    for size_suffix, master in cells_sorted:
+    for size_suffix, master, vt_corner in cells_sorted:
       sizes.append(size_suffix)
       # Extract numeric size
       size_num = parse_size(size_suffix)
       sizesi.append(size_num)
+      vt_corners.append(vt_corner)
       
       # Get output pin name
       if out_pin is None:
@@ -841,7 +850,8 @@ def build_cell_dict_from_openroad(db):
       "sizesi": sizesi,
       "n_sizes": len(sizes),
       "out_pin": out_pin if out_pin else "/Y",  # Default to /Y for ASAP7
-      "c_in": c_in_list
+      "c_in": c_in_list,
+      # "vt_corners": vt_corners
     }
     
     cell_name_dict[base_name] = str(idx)
@@ -910,6 +920,8 @@ def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell
       inst_name = s_iterm.getInst().getName()
       term_name = s_iterm.getInst().getName() + "/" + s_iterm.getMTerm().getName()
       cell_type = s_iterm.getInst().getMaster().getName()  # Library cell type
+      vt = cell_type.split('_')[-1]
+      # print(f"vt = {vt}")
       
       # Skip special cells that don't have size variants (tapcells, fillers, SRAMs, etc.)
       if any(x in cell_type.upper() for x in ["TAPCELL", "FILLER", "ENDCAP", "SRAM", "FAKERAM"]):
@@ -929,7 +941,9 @@ def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell
           'slew':0,
           'load':0,
           'cin':0,
-          'area': area}
+          'area': area,
+          # 'vt': vt
+          }
       if s_iterm.isInputSignal():
         # Input pin: this is a destination (sink) in the graph
         net_dsts.append((inst_dict[inst_name]['idx'],term_name))
