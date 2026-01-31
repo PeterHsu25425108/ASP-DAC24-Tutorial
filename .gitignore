@@ -2,5 +2,6 @@ __pycache__
 .*.sw[pno]
 .vscode/
 output_file/
-*.prof
+prof_files/
 docker/*
+beta_submit/

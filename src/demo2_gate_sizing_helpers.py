@@ -954,8 +954,8 @@ def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell
         net_srcs.append((inst_dict[inst_name]['idx'],term_name))
         # Extract timing properties from OpenROAD using pin_properties()
         # This calls OpenSTA APIs: getPinSlack(), getPinSlew(), getPortCap()
-        if net_idx > 0 and net_idx % 10000 == 0:
-          print(f"  Extracting timing properties at net {net_idx}...")
+        # if net_idx > 0 and net_idx % 10000 == 0:
+        #   print(f"  Extracting timing properties at net {net_idx}...")
         (inst_dict[inst_name]['slack'],
          inst_dict[inst_name]['slew'],
          inst_dict[inst_name]['load'])= pin_properties(s_iterm, CLKset, ord_design, timing)

@@ -88,6 +88,10 @@ platform_dir=sys.argv[2]
 output_dir=sys.argv[3]
 top_module=sys.argv[4]
 
+# get the second last folder name of input_dir as the design name
+# ex: /ISPD26-Contest/Benchmarks/aes_cipher_top/TCP_250_UTIL_0.40 -> aes_cipher_top
+design_name = Path(input_dir).parent.name
+
 print(input_dir)
 print(platform_dir)
 print(output_dir)
@@ -381,7 +385,19 @@ for i_episode in range(num_episodes):
 ##############
 #end training#
 ##############
+
 print(time() - train_start_time, "seconds for training")
+
+# === Area Check: Compare total cell area to available core area ===
+# core_bbox = block.getCoreArea()
+# core_width = core_bbox.xMax() - core_bbox.xMin()
+# core_height = core_bbox.yMax() - core_bbox.yMin()
+# core_area = (core_width * core_height) / (unit_micron * unit_micron)
+# final_total_area = torch.sum(G.ndata['area']).item() * norm_data['max_area'] / (unit_micron * unit_micron)
+# print(f"Core area available: {core_area:.4f} (micron^2)")
+# print(f"Final total cell area: {final_total_area:.4f} (micron^2)")
+# if final_total_area > core_area:
+#   print("[WARNING] Total cell area exceeds available core area! Placement may fail.")
 
 sorted_pareto_points = np.array(sorted(pareto_points, key=lambda x: x[0]))
 
@@ -389,7 +405,8 @@ data_v_episode = np.array(data_v_episode)
 G.num_nodes()
 #print(max(episode_reward))
 print("#################Done#################")
-  
+
+restore_start_time = time()
 print("==== Restoring best-known configuration in OpenROAD DB ===")
 # restore best-known configuration in the OpenROAD DB before writing output
 best_cells = reset_state  # list of cell master names returned by get_state_cells()
@@ -408,23 +425,36 @@ for inst_name, master_name in zip(inst_names.values(), best_cells):
     except Exception as e:
         print(f"[ERROR] swapMaster failed for {inst_name} -> {master_name}: {e}")
 
+print(time() - restore_start_time, "seconds for restoring best-known configuration")
+
+# ERC_fix_start_time = time()
+# print("=== Running ERC fix ===")
+# ord_design.evalTclString("estimate_parasitics -placement")
+# ord_design.evalTclString("repair_design")
+# print(time() - ERC_fix_start_time, "seconds for ERC fix")
+
+# ord_design.evalTclString("repair_timing -setup -skip_gate_cloning -skip_pin_swap ")
+
+dp_start_time = time()
 print("=== Running detailed placement ===")
 # Run detailed placement to legalize the design after gate sizing
-site = ord_design.getBlock().getRows()[0].getSite()
-max_disp_x = int(ord_design.micronToDBU(0.5) / site.getWidth())
-max_disp_y = int(ord_design.micronToDBU(1) / site.getHeight())
+# site = ord_design.getBlock().getRows()[0].getSite()
+# max_disp_x = int(ord_design.micronToDBU(20) / site.getWidth())
+# max_disp_y = int(ord_design.micronToDBU(20) / site.getHeight())
 try:
-  ord_design.getOpendp().detailedPlacement(max_disp_x, max_disp_y)
+  # ord_design.getOpendp().detailedPlacement(max_disp_x, max_disp_y)
+  ord_design.evalTclString("detailed_placement")
+  # ord_design.getOpendp().detailedPlacement()
 except Exception as e:
   print("[WARN] detailedPlacement failed (DPL):", e)
   print("You can inspect OpenROAD console output for 'DPL-0036' details.")
   # Continue without failing so final outputs can still be written.
-
+print(time() - dp_start_time, "seconds for detailed placement")
 
 print("=== Writing final output files ===")
 # Output def and verilog
 os.makedirs(os.path.dirname(f"{output_dir}/"), exist_ok=True)
-print(f"{output_dir}/contest.def")
-print(f"write_verilog {output_dir}/contest.v")
-ord_design.writeDef(f"{output_dir}/contest.def")
-ord_design.evalTclString(f"write_verilog {output_dir}/contest.v")
+print(f"{output_dir}/{design_name}.def")
+print(f"write_verilog {output_dir}/{design_name}.v")
+ord_design.writeDef(f"{output_dir}/{design_name}.def")
+ord_design.evalTclString(f"write_verilog {output_dir}/{design_name}.v")
